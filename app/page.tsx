@@ -1,351 +1,38 @@
 
 'use client';
-
 import { useEffect, useMemo, useState } from 'react';
+import type { User } from '@supabase/supabase-js';
+import { supabase } from '@/lib/supabase';
 
 type GameStatus = 'Playing' | 'Completed' | 'Backlog' | 'Dropped' | 'Wishlist';
+type LibraryRow = { id:string; user_id:string; game_id:string; status:GameStatus; platform_owned:string|null; rating:number|null; hours_played:number; start_date:string|null; finish_date:string|null; notes:string|null; mood:string|null; completion_type:string|null; created_at:string; updated_at:string; igdb_id:number|null; name:string; slug:string|null; cover_url:string|null; first_release_date:string|null; summary:string|null; genres:unknown[]; platforms:unknown[]; };
+type GameForm = { title:string; platform:string; status:GameStatus; rating:number; hours:number; genre:string; mood:string; notes:string; coverUrl:string; };
+const statuses: GameStatus[] = ['Playing','Completed','Backlog','Dropped','Wishlist'];
+function emptyForm(): GameForm { return { title:'', platform:'PS5', status:'Backlog', rating:0, hours:0, genre:'', mood:'', notes:'', coverUrl:'' }; }
+function slugify(value:string){ return value.toLowerCase().trim().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,''); }
+function getErrorMessage(error:unknown){ return error instanceof Error ? error.message : 'Something went wrong.'; }
 
-type Game = {
-  id: string;
-  title: string;
-  platform: string;
-  status: GameStatus;
-  rating: number;
-  hours: number;
-  genre: string;
-  mood: string;
-  notes: string;
-  createdAt: string;
-};
+export default function Home(){
+  const [user,setUser]=useState<User|null>(null); const [email,setEmail]=useState(''); const [password,setPassword]=useState(''); const [authMode,setAuthMode]=useState<'sign-in'|'sign-up'>('sign-in');
+  const [games,setGames]=useState<LibraryRow[]>([]); const [form,setForm]=useState<GameForm>(emptyForm()); const [editingId,setEditingId]=useState<string|null>(null); const [activeStatus,setActiveStatus]=useState<'All'|GameStatus>('All'); const [query,setQuery]=useState(''); const [recommendation,setRecommendation]=useState<LibraryRow|null>(null); const [loading,setLoading]=useState(true); const [saving,setSaving]=useState(false); const [message,setMessage]=useState('');
 
-const STORAGE_KEY = 'save-point-games-v1';
+  useEffect(()=>{ supabase.auth.getUser().then(({data})=>{setUser(data.user);setLoading(false);}); const {data:listener}=supabase.auth.onAuthStateChange((_e,session)=>setUser(session?.user??null)); return()=>listener.subscription.unsubscribe(); },[]);
+  useEffect(()=>{ if(user) loadLibrary(); else setGames([]); },[user]);
 
-const seedGames: Game[] = [
-  {
-    id: 'gt7',
-    title: 'Gran Turismo 7',
-    platform: 'PS5',
-    status: 'Playing',
-    rating: 8.5,
-    hours: 42,
-    genre: 'Racing',
-    mood: 'Wheel required',
-    notes: 'Great with the racing wheel. License tests remain psychological warfare.',
-    createdAt: new Date().toISOString(),
-  },
-  {
-    id: 'deus-ex',
-    title: 'Deus Ex',
-    platform: 'PC',
-    status: 'Completed',
-    rating: 9.5,
-    hours: 28,
-    genre: 'Immersive Sim',
-    mood: 'Conspiracy brain',
-    notes: 'Still ridiculously good. Every ending makes you feel slightly guilty.',
-    createdAt: new Date().toISOString(),
-  },
-  {
-    id: 'elden-ring',
-    title: 'Elden Ring',
-    platform: 'PS5',
-    status: 'Backlog',
-    rating: 0,
-    hours: 0,
-    genre: 'Action RPG',
-    mood: 'Pain and suffering',
-    notes: 'Bought with confidence. Opened with fear.',
-    createdAt: new Date().toISOString(),
-  },
-];
+  async function loadLibrary(){ setLoading(true); setMessage(''); const {data,error}=await supabase.from('user_game_library').select('*').order('updated_at',{ascending:false}); if(error)setMessage(error.message); else setGames((data??[]) as LibraryRow[]); setLoading(false); }
+  async function handleAuth(){ setMessage(''); if(!email||!password){setMessage('Enter your email and password.');return;} const req=authMode==='sign-in'?supabase.auth.signInWithPassword({email,password}):supabase.auth.signUp({email,password}); const {error}=await req; if(error)setMessage(error.message); else if(authMode==='sign-up')setMessage('Account created. Check your email if Supabase asks you to confirm before signing in.'); }
+  async function signOut(){ await supabase.auth.signOut(); setUser(null); setGames([]); }
 
-const statuses: GameStatus[] = ['Playing', 'Completed', 'Backlog', 'Dropped', 'Wishlist'];
+  const stats=useMemo(()=>{ const completed=games.filter(g=>g.status==='Completed'); const totalHours=games.reduce((s,g)=>s+Number(g.hours_played||0),0); const rated=games.filter(g=>Number(g.rating||0)>0); const averageRating=rated.length===0?0:rated.reduce((s,g)=>s+Number(g.rating||0),0)/rated.length; return {total:games.length,completed:completed.length,totalHours,averageRating}; },[games]);
+  const filteredGames=useMemo(()=>games.filter(g=>activeStatus==='All'||g.status===activeStatus).filter(g=>`${g.name} ${g.platform_owned??''} ${g.mood??''} ${g.notes??''}`.toLowerCase().includes(query.toLowerCase())).sort((a,b)=>a.name.localeCompare(b.name)),[games,activeStatus,query]);
 
-function emptyForm(): Omit<Game, 'id' | 'createdAt'> {
-  return {
-    title: '',
-    platform: 'PS5',
-    status: 'Backlog',
-    rating: 0,
-    hours: 0,
-    genre: '',
-    mood: '',
-    notes: '',
-  };
-}
+  async function saveGame(){ if(!user)return; if(!form.title.trim()){setMessage('Game title is required.');return;} setSaving(true); setMessage(''); try{ if(editingId){ const row=games.find(g=>g.id===editingId); if(!row)throw new Error('Could not find the game you are editing.'); const {error:gameError}=await supabase.from('games').update({name:form.title.trim(),slug:slugify(form.title),cover_url:form.coverUrl||null,genres:form.genre?[form.genre]:[]}).eq('id',row.game_id); if(gameError)throw gameError; const {error:userGameError}=await supabase.from('user_games').update({status:form.status,platform_owned:form.platform||null,rating:form.rating||null,hours_played:Number(form.hours||0),notes:form.notes||null,mood:form.mood||null}).eq('id',editingId).eq('user_id',user.id); if(userGameError)throw userGameError; setEditingId(null); } else { const {data:gameData,error:gameError}=await supabase.from('games').insert({name:form.title.trim(),slug:slugify(form.title),cover_url:form.coverUrl||null,genres:form.genre?[form.genre]:[],platforms:form.platform?[form.platform]:[]}).select('id').single(); if(gameError)throw gameError; const {error:userGameError}=await supabase.from('user_games').insert({user_id:user.id,game_id:gameData.id,status:form.status,platform_owned:form.platform||null,rating:form.rating||null,hours_played:Number(form.hours||0),notes:form.notes||null,mood:form.mood||null}); if(userGameError)throw userGameError; } setForm(emptyForm()); await loadLibrary(); }catch(error){setMessage(getErrorMessage(error));}finally{setSaving(false);} }
+  function editGame(game:LibraryRow){ setEditingId(game.id); setForm({title:game.name,platform:game.platform_owned??'PS5',status:game.status,rating:Number(game.rating||0),hours:Number(game.hours_played||0),genre:Array.isArray(game.genres)&&game.genres.length>0?String(game.genres[0]):'',mood:game.mood??'',notes:game.notes??'',coverUrl:game.cover_url??''}); window.scrollTo({top:0,behavior:'smooth'}); }
+  async function deleteGame(id:string){ if(!user)return; setMessage(''); const {error}=await supabase.from('user_games').delete().eq('id',id).eq('user_id',user.id); if(error)setMessage(error.message); else{ if(editingId===id){setEditingId(null);setForm(emptyForm());} await loadLibrary(); } }
+  function pickBacklogGame(){ const candidates=games.filter(g=>g.status==='Backlog'||g.status==='Wishlist'); if(candidates.length===0){setRecommendation(null);setMessage('No backlog or wishlist games to pick from.');return;} setRecommendation(candidates[Math.floor(Math.random()*candidates.length)]); }
 
-export default function Home() {
-  const [games, setGames] = useState<Game[]>([]);
-  const [form, setForm] = useState(emptyForm());
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [activeStatus, setActiveStatus] = useState<'All' | GameStatus>('All');
-  const [query, setQuery] = useState('');
-  const [recommendation, setRecommendation] = useState<Game | null>(null);
+  if(loading)return <main className="auth-wrap"><section className="card auth-card"><div className="kicker">Save Point</div><div className="auth-title">Loading...</div></section></main>;
+  if(!user)return <main className="auth-wrap"><section className="card auth-card"><div className="kicker">Save Point</div><div className="auth-title">Sign in to your game diary.</div><p className="helper">Supabase now stores your games in the cloud instead of browser localStorage.</p><div className="form" style={{marginTop:18}}><div className="field"><label>Email</label><input value={email} onChange={e=>setEmail(e.target.value)} placeholder="you@example.com" /></div><div className="field"><label>Password</label><input type="password" value={password} onChange={e=>setPassword(e.target.value)} placeholder="Minimum 6 characters" /></div>{message&&<div className="error">{message}</div>}<button className="btn primary" onClick={handleAuth}>{authMode==='sign-in'?'Sign in':'Create account'}</button><button className="btn ghost" onClick={()=>setAuthMode(authMode==='sign-in'?'sign-up':'sign-in')}>{authMode==='sign-in'?'Need an account? Sign up':'Already have an account? Sign in'}</button></div></section></main>;
 
-  useEffect(() => {
-    const stored = window.localStorage.getItem(STORAGE_KEY);
-    if (stored) {
-      setGames(JSON.parse(stored));
-    } else {
-      setGames(seedGames);
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(seedGames));
-    }
-  }, []);
-
-  useEffect(() => {
-    if (games.length > 0) {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(games));
-    }
-  }, [games]);
-
-  const stats = useMemo(() => {
-    const completed = games.filter((game) => game.status === 'Completed');
-    const totalHours = games.reduce((sum, game) => sum + Number(game.hours || 0), 0);
-    const rated = games.filter((game) => game.rating > 0);
-    const averageRating =
-      rated.length === 0
-        ? 0
-        : rated.reduce((sum, game) => sum + Number(game.rating || 0), 0) / rated.length;
-    const backlog = games.filter((game) => game.status === 'Backlog').length;
-
-    return {
-      total: games.length,
-      completed: completed.length,
-      totalHours,
-      averageRating,
-      backlog,
-    };
-  }, [games]);
-
-  const filteredGames = useMemo(() => {
-    return games
-      .filter((game) => activeStatus === 'All' || game.status === activeStatus)
-      .filter((game) => {
-        const text = `${game.title} ${game.platform} ${game.genre} ${game.mood} ${game.notes}`.toLowerCase();
-        return text.includes(query.toLowerCase());
-      })
-      .sort((a, b) => a.title.localeCompare(b.title));
-  }, [games, activeStatus, query]);
-
-  function saveGame() {
-    if (!form.title.trim()) return;
-
-    if (editingId) {
-      setGames((current) =>
-        current.map((game) =>
-          game.id === editingId
-            ? {
-                ...game,
-                ...form,
-                title: form.title.trim(),
-                rating: Number(form.rating),
-                hours: Number(form.hours),
-              }
-            : game
-        )
-      );
-      setEditingId(null);
-    } else {
-      const newGame: Game = {
-        ...form,
-        id: crypto.randomUUID(),
-        title: form.title.trim(),
-        rating: Number(form.rating),
-        hours: Number(form.hours),
-        createdAt: new Date().toISOString(),
-      };
-      setGames((current) => [newGame, ...current]);
-    }
-
-    setForm(emptyForm());
-  }
-
-  function editGame(game: Game) {
-    setEditingId(game.id);
-    setForm({
-      title: game.title,
-      platform: game.platform,
-      status: game.status,
-      rating: game.rating,
-      hours: game.hours,
-      genre: game.genre,
-      mood: game.mood,
-      notes: game.notes,
-    });
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  }
-
-  function deleteGame(id: string) {
-    setGames((current) => current.filter((game) => game.id !== id));
-    if (editingId === id) {
-      setEditingId(null);
-      setForm(emptyForm());
-    }
-  }
-
-  function pickBacklogGame() {
-    const candidates = games.filter((game) => game.status === 'Backlog' || game.status === 'Wishlist');
-    if (candidates.length === 0) {
-      setRecommendation(null);
-      return;
-    }
-    const chosen = candidates[Math.floor(Math.random() * candidates.length)];
-    setRecommendation(chosen);
-  }
-
-  function resetDemo() {
-    setGames(seedGames);
-    setForm(emptyForm());
-    setEditingId(null);
-    setRecommendation(null);
-  }
-
-  return (
-    <main className="page">
-      <section className="hero">
-        <div>
-          <div className="kicker">Save Point</div>
-          <h1>Your gaming diary, without the backlog guilt.</h1>
-          <p className="subtitle">
-            Track what you are playing, what you finished, what you abandoned, and what your taste actually looks like over time.
-          </p>
-        </div>
-        <div className="hero-actions">
-          <button className="btn primary" onClick={pickBacklogGame}>Pick my next game</button>
-          <button className="btn ghost" onClick={resetDemo}>Reset demo</button>
-        </div>
-      </section>
-
-      <section className="grid stats">
-        <div className="card">
-          <div className="stat-label">Games tracked</div>
-          <div className="stat-value">{stats.total}</div>
-        </div>
-        <div className="card">
-          <div className="stat-label">Completed</div>
-          <div className="stat-value">{stats.completed}</div>
-        </div>
-        <div className="card">
-          <div className="stat-label">Hours logged</div>
-          <div className="stat-value">{stats.totalHours}</div>
-        </div>
-        <div className="card">
-          <div className="stat-label">Avg rating</div>
-          <div className="stat-value">{stats.averageRating ? stats.averageRating.toFixed(1) : '—'}</div>
-        </div>
-      </section>
-
-      {recommendation && (
-        <section className="card recommendation">
-          <div className="kicker">Backlog Goblin says</div>
-          <div className="rec-title">Play {recommendation.title}</div>
-          <div className="rec-copy">
-            It is sitting in your {recommendation.status.toLowerCase()} pile on {recommendation.platform}.
-            {recommendation.mood ? ` Current vibe: ${recommendation.mood}.` : ''}
-          </div>
-        </section>
-      )}
-
-      <section className="grid main" style={{ marginTop: 16 }}>
-        <aside className="card">
-          <h2>{editingId ? 'Edit game' : 'Add game'}</h2>
-          <div className="form">
-            <div className="field">
-              <label>Title</label>
-              <input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="Final Fantasy VII Rebirth" />
-            </div>
-
-            <div className="row">
-              <div className="field">
-                <label>Platform</label>
-                <input value={form.platform} onChange={(e) => setForm({ ...form, platform: e.target.value })} placeholder="PS5" />
-              </div>
-              <div className="field">
-                <label>Status</label>
-                <select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value as GameStatus })}>
-                  {statuses.map((status) => <option key={status}>{status}</option>)}
-                </select>
-              </div>
-            </div>
-
-            <div className="row">
-              <div className="field">
-                <label>Rating / 10</label>
-                <input type="number" min="0" max="10" step="0.5" value={form.rating} onChange={(e) => setForm({ ...form, rating: Number(e.target.value) })} />
-              </div>
-              <div className="field">
-                <label>Hours</label>
-                <input type="number" min="0" value={form.hours} onChange={(e) => setForm({ ...form, hours: Number(e.target.value) })} />
-              </div>
-            </div>
-
-            <div className="row">
-              <div className="field">
-                <label>Genre</label>
-                <input value={form.genre} onChange={(e) => setForm({ ...form, genre: e.target.value })} placeholder="Racing" />
-              </div>
-              <div className="field">
-                <label>Mood</label>
-                <input value={form.mood} onChange={(e) => setForm({ ...form, mood: e.target.value })} placeholder="Chill, sweaty, cinematic..." />
-              </div>
-            </div>
-
-            <div className="field">
-              <label>Notes</label>
-              <textarea value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="What made it good, bad, bloated, or worth finishing?" />
-            </div>
-
-            <button className="btn primary" onClick={saveGame}>{editingId ? 'Save changes' : 'Add to library'}</button>
-            {editingId && (
-              <button className="btn ghost" onClick={() => { setEditingId(null); setForm(emptyForm()); }}>Cancel edit</button>
-            )}
-          </div>
-        </aside>
-
-        <section className="card">
-          <div className="toolbar">
-            <div className="tabs">
-              {(['All', ...statuses] as Array<'All' | GameStatus>).map((status) => (
-                <button
-                  key={status}
-                  className={`tab ${activeStatus === status ? 'active' : ''}`}
-                  onClick={() => setActiveStatus(status)}
-                >
-                  {status}
-                </button>
-              ))}
-            </div>
-            <input className="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search games..." />
-          </div>
-
-          <div className="games">
-            {filteredGames.length === 0 ? (
-              <div className="empty">No games found. Add one, or change your filters.</div>
-            ) : (
-              filteredGames.map((game) => (
-                <article className="game-card" key={game.id}>
-                  <div className="cover">{game.title.slice(0, 1).toUpperCase()}</div>
-                  <div>
-                    <div className="game-title">{game.title}</div>
-                    <div className="meta">
-                      <span className="pill status">{game.status}</span>
-                      <span className="pill">{game.platform}</span>
-                      {game.genre && <span className="pill">{game.genre}</span>}
-                      {game.rating > 0 && <span className="pill">{game.rating}/10</span>}
-                      {game.hours > 0 && <span className="pill">{game.hours}h</span>}
-                    </div>
-                    {game.notes && <div className="notes">{game.notes}</div>}
-                  </div>
-                  <div className="actions">
-                    <button className="icon-btn" onClick={() => editGame(game)} aria-label={`Edit ${game.title}`}>✎</button>
-                    <button className="icon-btn" onClick={() => deleteGame(game.id)} aria-label={`Delete ${game.title}`}>×</button>
-                  </div>
-                </article>
-              ))
-            )}
-          </div>
-        </section>
-      </section>
-    </main>
-  );
+  return <main className="page"><section className="hero"><div><div className="kicker">Save Point</div><h1>Your cloud-backed gaming diary.</h1><p className="subtitle">Track what you are playing, what you finished, what you abandoned, and what your taste actually looks like over time.</p></div><div className="userbar"><span>{user.email}</span><button className="btn primary" onClick={pickBacklogGame}>Pick my next game</button><button className="btn ghost" onClick={loadLibrary}>Refresh</button><button className="btn danger" onClick={signOut}>Sign out</button></div></section>{message&&<section className="card error" style={{marginBottom:16}}>{message}</section>}<section className="grid stats"><div className="card"><div className="stat-label">Games tracked</div><div className="stat-value">{stats.total}</div></div><div className="card"><div className="stat-label">Completed</div><div className="stat-value">{stats.completed}</div></div><div className="card"><div className="stat-label">Hours logged</div><div className="stat-value">{stats.totalHours}</div></div><div className="card"><div className="stat-label">Avg rating</div><div className="stat-value">{stats.averageRating?stats.averageRating.toFixed(1):'—'}</div></div></section>{recommendation&&<section className="card recommendation"><div className="kicker">Backlog Goblin says</div><div className="rec-title">Play {recommendation.name}</div><div className="rec-copy">It is sitting in your {recommendation.status.toLowerCase()} pile on {recommendation.platform_owned??'an unspecified platform'}.{recommendation.mood?` Current vibe: ${recommendation.mood}.`:''}</div></section>}<section className="grid main" style={{marginTop:16}}><aside className="card"><h2>{editingId?'Edit game':'Add game'}</h2><div className="form"><div className="field"><label>Title</label><input value={form.title} onChange={e=>setForm({...form,title:e.target.value})} placeholder="Gran Turismo 7" /></div><div className="field"><label>Cover URL</label><input value={form.coverUrl} onChange={e=>setForm({...form,coverUrl:e.target.value})} placeholder="Optional for now. IGDB search comes next." /></div><div className="row"><div className="field"><label>Platform</label><input value={form.platform} onChange={e=>setForm({...form,platform:e.target.value})} placeholder="PS5" /></div><div className="field"><label>Status</label><select value={form.status} onChange={e=>setForm({...form,status:e.target.value as GameStatus})}>{statuses.map(s=><option key={s}>{s}</option>)}</select></div></div><div className="row"><div className="field"><label>Rating / 10</label><input type="number" min="0" max="10" step="0.5" value={form.rating} onChange={e=>setForm({...form,rating:Number(e.target.value)})} /></div><div className="field"><label>Hours</label><input type="number" min="0" value={form.hours} onChange={e=>setForm({...form,hours:Number(e.target.value)})} /></div></div><div className="row"><div className="field"><label>Genre</label><input value={form.genre} onChange={e=>setForm({...form,genre:e.target.value})} placeholder="Racing" /></div><div className="field"><label>Mood</label><input value={form.mood} onChange={e=>setForm({...form,mood:e.target.value})} placeholder="Chill, sweaty, cinematic..." /></div></div><div className="field"><label>Notes</label><textarea value={form.notes} onChange={e=>setForm({...form,notes:e.target.value})} placeholder="What made it good, bad, bloated, or worth finishing?" /></div><button className="btn primary" onClick={saveGame} disabled={saving}>{saving?'Saving...':editingId?'Save changes':'Add to library'}</button>{editingId&&<button className="btn ghost" onClick={()=>{setEditingId(null);setForm(emptyForm());}}>Cancel edit</button>}</div></aside><section className="card"><div className="toolbar"><div className="tabs">{(['All',...statuses] as Array<'All'|GameStatus>).map(s=><button key={s} className={`tab ${activeStatus===s?'active':''}`} onClick={()=>setActiveStatus(s)}>{s}</button>)}</div><input className="search" value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search games..." /></div><div className="games">{filteredGames.length===0?<div className="empty">No games found. Add one, or change your filters.</div>:filteredGames.map(game=><article className="game-card" key={game.id}><div className="cover">{game.cover_url?<img src={game.cover_url} alt={`${game.name} cover`} />:game.name.slice(0,1).toUpperCase()}</div><div><div className="game-title">{game.name}</div><div className="meta"><span className="pill status">{game.status}</span>{game.platform_owned&&<span className="pill">{game.platform_owned}</span>}{Array.isArray(game.genres)&&game.genres[0]&&<span className="pill">{String(game.genres[0])}</span>}{Number(game.rating||0)>0&&<span className="pill">{game.rating}/10</span>}{Number(game.hours_played||0)>0&&<span className="pill">{game.hours_played}h</span>}</div>{game.notes&&<div className="notes">{game.notes}</div>}</div><div className="actions"><button className="icon-btn" onClick={()=>editGame(game)} aria-label={`Edit ${game.name}`}>✎</button><button className="icon-btn" onClick={()=>deleteGame(game.id)} aria-label={`Delete ${game.name}`}>×</button></div></article>)}</div></section></section></main>;
 }
